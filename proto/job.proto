@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package models;
+
+option go_package = "github.com/entreya/job-aggregation/pkg/models";
+
+// JobPosting represents a single job scraping result.
+message JobPosting {
+    // Unique identifier for the job, likely composed of source and ID.
+    string id = 1;
+    // content of the job title.
+    string title = 2;
+    // Department or ministry offering the job.
+    string department = 3;
+    // Location of the job.
+    string location = 4;
+    // URL to the job posting or PDF.
+    string url = 5;
+    // Date of the job posting or deadline.
+    string date = 6;
+}
+
+// JobList is a wrapper for a list of jobs, suitable for serialization.
+message JobList {
+    // List of job postings.
+    repeated JobPosting jobs = 1;
+    // Unix timestamp of when the list was last updated.
+    int64 last_updated = 2;
+}
