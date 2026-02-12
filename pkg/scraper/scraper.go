@@ -116,7 +116,7 @@ func (s *Scraper) Scrape() (*models.JobList, error) {
 	})
 
 	s.collector.OnError(func(r *colly.Response, err error) {
-		fmt.Println("Request URL:", r.Request.URL, "failed with response:", r, "\nError:", err)
+		log.Printf("Request URL: %s failed with response: %v\nError: %v\nProxy: %s", r.Request.URL, r, err, r.Request.ProxyURL)
 	})
 
 	fmt.Println("Visiting:", s.TargetURL)
