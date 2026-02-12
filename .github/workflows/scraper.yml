@@ -1,34 +1,48 @@
 name: Job Scraper
 
-# This workflow commits the locally-scraped jobs.db to the repo.
-# The scraper must be run locally because recruitment.nic.in blocks cloud IPs.
-# Run locally: go run cmd/scraper/main.go
-# Then: git add jobs.db metadata.json && git commit && git push
+# This workflow scrapes jobs using rotating proxies to bypass IP blocks.
+# Proxy logic is handled inside the Go application via colly/proxy.
 
 on:
+  schedule:
+    - cron: '0 */6 * * *' # Run every 6 hours
+  workflow_dispatch:      # Allow manual trigger
   push:
     branches: [ "main" ]
-    paths:
+    paths-ignore:         # Prevent loop
       - 'jobs.db'
       - 'metadata.json'
-  workflow_dispatch:
 
 jobs:
-  validate:
+  scrape:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write # Important for pushing changes
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Validate jobs.db
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Run Scraper
         run: |
-          if [ ! -f jobs.db ]; then
-            echo "❌ jobs.db not found"
-            exit 1
-          fi
-          echo "✅ jobs.db exists ($(stat --format=%s jobs.db) bytes)"
-          echo "✅ metadata.json:"
-          cat metadata.json
+          # Go scraper fetches proxies and rotates them automatically
+          go run cmd/scraper/main.go
+
+      - name: Check for changes
+        id: git-check
+        run: |
+          git diff --quiet metadata.json || echo "changes=true" >> $GITHUB_OUTPUT
+
+      - name: Commit and Push changes
+        if: steps.git-check.outputs.changes == 'true'
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add jobs.db metadata.json
+          git commit -m "Update job database [skip ci]"
+          git push
