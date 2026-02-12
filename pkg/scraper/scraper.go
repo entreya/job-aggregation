@@ -18,29 +18,30 @@ type Scraper struct {
 	TargetURL string
 }
 
-// NewScraper creates a new Scraper instance.
 func NewScraper(targetURL string) *Scraper {
-	// Custom Transport to handle slow gov sites and potential SSL issues
-	transport := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   60 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   30 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
-	}
-
 	c := colly.NewCollector(
 		colly.AllowedDomains("recruitment.nic.in"),
 		colly.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"),
 		colly.AllowURLRevisit(),
 	)
 
-	c.WithTransport(transport)
-	c.SetRequestTimeout(120 * time.Second)
+	// Only apply custom transport if NOT using a local file
+	if !strings.HasPrefix(targetURL, "file://") {
+		// Custom Transport to handle slow gov sites and potential SSL issues
+		transport := &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   60 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   30 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
+		}
+		c.WithTransport(transport)
+		c.SetRequestTimeout(120 * time.Second)
+	}
 
 	return &Scraper{
 		collector: c,
