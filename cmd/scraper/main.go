@@ -4,15 +4,20 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/entreya/job-aggregation/pkg/db"
+	"github.com/entreya/job-aggregation/pkg/models"
 	"github.com/entreya/job-aggregation/pkg/scraper"
+)
+
+const (
+	jobsJSONPath = "data/jobs.json"
 )
 
 type Metadata struct {
@@ -22,7 +27,7 @@ type Metadata struct {
 }
 
 func main() {
-	log.Println("Starting job scraper (SQLite Mode)...")
+	log.Println("Starting job scraper (Chromedp Mode)...")
 
 	// Initialize DB
 	dbPath := "jobs.db"
@@ -31,12 +36,8 @@ func main() {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 
-	// Parse flags
-	targetURL := flag.String("target", "https://recruitment.nic.in/index_new.php", "Target URL or file path")
-	flag.Parse()
-
 	// Scrape
-	s := scraper.NewScraper(*targetURL)
+	s := scraper.NewScraper("https://recruitment.nic.in/index_new.php")
 	jobsList, err := s.Scrape()
 	if err != nil {
 		log.Fatalf("Failed to scrape jobs: %v", err)
@@ -44,15 +45,14 @@ func main() {
 
 	log.Printf("Scraped %d jobs. Inserting into DB...", len(jobsList.Jobs))
 
-	// Upsert jobs
+	// Insert into SQLite and upsert
 	for _, j := range jobsList.Jobs {
-		// Map Proto to DB struct
 		job := db.Job{
 			ID:         j.Id,
 			Title:      j.Title,
 			Department: j.Department,
 			Location:   j.Location,
-			PostedDate: time.Now().Unix(), // Ideally scrape this
+			PostedDate: time.Now().Unix(),
 			URL:        j.Url,
 		}
 		if err := database.UpsertJob(job); err != nil {
@@ -70,7 +70,12 @@ func main() {
 		log.Fatalf("Failed to generate metadata: %v", err)
 	}
 
-	log.Println("Successfully updated jobs.db and metadata.json")
+	// Export to JSON
+	if err := exportToJSON(jobsList); err != nil {
+		log.Printf("Error exporting to JSON: %v", err)
+	}
+
+	log.Println("Successfully updated jobs.db, metadata.json, and data/jobs.json")
 }
 
 func generateMetadata(dbPath string, count int) error {
@@ -98,4 +103,22 @@ func generateMetadata(dbPath string, count int) error {
 	}
 
 	return os.WriteFile("metadata.json", data, 0644)
+}
+
+func exportToJSON(jobList *models.JobList) error {
+	// Ensure directory exists
+	dir := filepath.Dir(jobsJSONPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+
+	file, err := os.Create(jobsJSONPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(jobList)
 }

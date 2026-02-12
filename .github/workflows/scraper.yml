@@ -1,7 +1,4 @@
-name: Job Scraper
-
-# This workflow scrapes jobs using rotating proxies to bypass IP blocks.
-# Proxy logic is handled inside the Go application via colly/proxy.
+name: Job Scraper (WARP + Chromedp)
 
 on:
   schedule:
@@ -12,12 +9,14 @@ on:
     paths-ignore:         # Prevent loop
       - 'jobs.db'
       - 'metadata.json'
+      - 'data/jobs.json'
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # Important for pushing changes
+      contents: write
+      issues: write
 
     steps:
       - name: Checkout code
@@ -28,9 +27,21 @@ jobs:
         with:
           go-version: '1.23'
 
+      - name: Install Google Chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+
+      - name: Setup Cloudflare WARP
+        uses: Boostport/setup-cloudflare-warp@v1
+        with:
+          organization: ${{ secrets.CLOUDFLARE_ORG }}
+          auth_client_id: ${{ secrets.WARP_CLIENT_ID }}
+          auth_client_secret: ${{ secrets.WARP_CLIENT_SECRET }}
+        continue-on-error: true # Allow to fail gracefully if secrets not set, though scraping likely fails then
+
       - name: Run Scraper
         run: |
-          # Go scraper fetches proxies and rotates them automatically
           go run cmd/scraper/main.go
 
       - name: Check for changes
@@ -43,6 +54,18 @@ jobs:
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git add jobs.db metadata.json
+          git add jobs.db metadata.json data/jobs.json
           git commit -m "Update job database [skip ci]"
           git push
+
+      - name: Create Issue on Failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🚨 Scraper Failed: check logs',
+              body: 'The scraper workflow failed. Please check the Action logs for details. It might be an IP block or selector change.'
+            })
