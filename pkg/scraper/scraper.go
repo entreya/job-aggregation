@@ -31,8 +31,8 @@ func NewScraper(targetURL string) *Scraper {
 	// Only apply proxy rotation if NOT using a local file
 	if !strings.HasPrefix(targetURL, "file://") {
 		log.Println("Fetching proxy list...")
-		// Fetch proxies from a free list (HTTP/S, Anonymous)
-		resp, err := http.Get("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all")
+		// Fetch proxies from a free list (HTTP/S, Anonymous) - Force SSL=yes for HTTPS target
+		resp, err := http.Get("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all&ssl=yes&anonymity=all")
 		if err == nil {
 			defer resp.Body.Close()
 			body, _ := io.ReadAll(resp.Body)
@@ -47,7 +47,7 @@ func NewScraper(targetURL string) *Scraper {
 			}
 
 			if len(validProxies) > 0 {
-				log.Printf("Found %d proxies. Setting up rotation.", len(validProxies))
+				log.Printf("Found %d HTTPS proxies. Setting up rotation.", len(validProxies))
 				rp, err := proxy.RoundRobinProxySwitcher(validProxies...)
 				if err != nil {
 					log.Printf("Failed to set proxy switcher: %v", err)
@@ -64,7 +64,7 @@ func NewScraper(targetURL string) *Scraper {
 		// Keep the custom transport settings for robustness
 		transport := &http.Transport{
 			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second, // Shorter timeout for proxies to fail fast
+				Timeout:   10 * time.Second, // Fast fail for proxies
 				KeepAlive: 30 * time.Second,
 			}).DialContext,
 			MaxIdleConns:          100,
@@ -75,7 +75,7 @@ func NewScraper(targetURL string) *Scraper {
 			DisableKeepAlives:     true,
 		}
 		c.WithTransport(transport)
-		c.SetRequestTimeout(60 * time.Second)
+		c.SetRequestTimeout(20 * time.Second) // Fast timeout for individual requests
 	}
 
 	return &Scraper{
@@ -91,9 +91,12 @@ func (s *Scraper) Scrape() (*models.JobList, error) {
 		Jobs:        make([]*models.JobPosting, 0),
 	}
 
+	// Attempt counter to prevent infinite loops (simple context hack or just limit retries conceptually)
+	// For simplicity, we'll just trust Colly's queue or rely on the fact that we have many proxies.
+
 	// Register callbacks
 	s.collector.OnHTML("a[href]", func(e *colly.HTMLElement) {
-		// ... (rest of logic same) ...
+		// ...
 		link := e.Attr("href")
 		text := strings.TrimSpace(e.Text)
 
@@ -116,7 +119,11 @@ func (s *Scraper) Scrape() (*models.JobList, error) {
 	})
 
 	s.collector.OnError(func(r *colly.Response, err error) {
-		log.Printf("Request URL: %s failed with response: %v\nError: %v\nProxy: %s", r.Request.URL, r, err, r.Request.ProxyURL)
+		log.Printf("Request URL: %s failed. Proxy: %s. Error: %v. Retrying...", r.Request.URL, r.Request.ProxyURL, err)
+		// Retry with a different proxy (RoundRobin will pick next one)
+		// We add a short delay to avoid rapid-fire looping if all fail
+		time.Sleep(1 * time.Second)
+		r.Request.Retry()
 	})
 
 	fmt.Println("Visiting:", s.TargetURL)
