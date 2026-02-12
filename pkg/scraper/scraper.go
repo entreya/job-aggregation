@@ -1,18 +1,21 @@
 package scraper
 
 import (
-	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/entreya/job-aggregation/pkg/models"
 	"github.com/gocolly/colly/v2"
 	"github.com/gocolly/colly/v2/proxy"
+)
+
+const (
+	MaxRetries = 3
 )
 
 // Scraper handles the job scraping logic.
@@ -24,67 +27,82 @@ type Scraper struct {
 func NewScraper(targetURL string) *Scraper {
 	c := colly.NewCollector(
 		colly.AllowedDomains("recruitment.nic.in"),
-		colly.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"),
+		colly.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
 		colly.AllowURLRevisit(),
 	)
 
+	// Set headers to mimic real browser
+	c.OnRequest(func(r *colly.Request) {
+		r.Headers.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+		r.Headers.Set("Accept-Language", "en-US,en;q=0.5")
+		r.Headers.Set("Referer", "https://www.google.com/")
+		r.Headers.Set("Upgrade-Insecure-Requests", "1")
+	})
+
 	// Only apply proxy rotation if NOT using a local file
 	if !strings.HasPrefix(targetURL, "file://") {
-		// Custom Transport to handle slow gov sites and potential SSL issues
-		transport := &http.Transport{
-			DialContext: (&net.Dialer{
-				Timeout:   10 * time.Second, // Fast fail for proxies
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			MaxIdleConns:          100,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-			TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
-			DisableKeepAlives:     true,
-		}
-
-		log.Println("Fetching proxy list...")
-		// Fetch proxies from a free list (HTTP/S, Anonymous) - Force SSL=yes for HTTPS target
-		resp, err := http.Get("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all&ssl=yes&anonymity=all")
-		if err == nil {
-			defer resp.Body.Close()
-			body, _ := io.ReadAll(resp.Body)
-			proxyList := strings.Split(string(body), "\n")
-
-			var validProxies []string
-			for _, p := range proxyList {
-				p = strings.TrimSpace(p)
-				if p != "" {
-					validProxies = append(validProxies, "http://"+p)
-				}
+		// 1. Check for manual proxy (e.g. from GitHub Secrets)
+		envProxy := os.Getenv("HTTP_PROXY")
+		if envProxy != "" {
+			log.Printf("Using configured HTTP_PROXY: %s", envProxy)
+			if err := c.SetProxy(envProxy); err != nil {
+				log.Printf("Failed to set HTTP_PROXY: %v", err)
+			}
+		} else {
+			// 2. Fetch proxies (Prioritize India for gov sites)
+			log.Println("Fetching proxy list (India)...")
+			// Try fetching Indian proxies first
+			proxies := fetchProxies("IN")
+			if len(proxies) == 0 {
+				log.Println("No Indian proxies found, trying all countries...")
+				proxies = fetchProxies("all")
 			}
 
-			if len(validProxies) > 0 {
-				log.Printf("Found %d HTTPS proxies. Setting up rotation.", len(validProxies))
-				rp, err := proxy.RoundRobinProxySwitcher(validProxies...)
+			if len(proxies) > 0 {
+				log.Printf("Found %d HTTPS proxies. Setting up rotation.", len(proxies))
+				rp, err := proxy.RoundRobinProxySwitcher(proxies...)
 				if err != nil {
 					log.Printf("Failed to set proxy switcher: %v", err)
 				} else {
-					// CRITICAL FIX: Assign the proxy switcher directly to the Transport
-					transport.Proxy = rp
-					// c.SetProxyFunc(rp) // Not needed if we set it on transport, and setting it on c might be ignored if transport is replaced
+					// CRITICAL: Assign the proxy switcher directly to the Transport via Colly's mechanism
+					c.SetProxyFunc(rp)
 				}
 			} else {
 				log.Println("No proxies found. Falling back to direct connection.")
 			}
-		} else {
-			log.Printf("Failed to fetch proxy list: %v", err)
 		}
 
-		c.WithTransport(transport)
-		c.SetRequestTimeout(20 * time.Second) // Fast timeout for individual requests
+		// Use standard transport (Colly's default) to ensure SetProxyFunc works,
+		// OR configured strict transport if proxies are failing.
+		// For now, let's rely on Colly's default handling + our Headers.
+		c.SetRequestTimeout(30 * time.Second)
 	}
 
 	return &Scraper{
 		collector: c,
 		TargetURL: targetURL,
 	}
+}
+
+func fetchProxies(country string) []string {
+	apiURL := fmt.Sprintf("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=%s&ssl=yes&anonymity=all", country)
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		log.Printf("Failed to fetch proxies: %v", err)
+		return nil
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	lines := strings.Split(string(body), "\n")
+	var valid []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			valid = append(valid, "http://"+line)
+		}
+	}
+	return valid
 }
 
 // Scrape fetches job postings from the recruitment site.
@@ -94,15 +112,10 @@ func (s *Scraper) Scrape() (*models.JobList, error) {
 		Jobs:        make([]*models.JobPosting, 0),
 	}
 
-	// Attempt counter to prevent infinite loops (simple context hack or just limit retries conceptually)
-	// For simplicity, we'll just trust Colly's queue or rely on the fact that we have many proxies.
-
 	// Register callbacks
 	s.collector.OnHTML("a[href]", func(e *colly.HTMLElement) {
-		// ...
 		link := e.Attr("href")
 		text := strings.TrimSpace(e.Text)
-
 		if link == "" || text == "" {
 			return
 		}
@@ -121,12 +134,23 @@ func (s *Scraper) Scrape() (*models.JobList, error) {
 		jobList.Jobs = append(jobList.Jobs, job)
 	})
 
+	// Retry logic
 	s.collector.OnError(func(r *colly.Response, err error) {
-		log.Printf("Request URL: %s failed. Proxy: %s. Error: %v. Retrying...", r.Request.URL, r.Request.ProxyURL, err)
-		// Retry with a different proxy (RoundRobin will pick next one)
-		// We add a short delay to avoid rapid-fire looping if all fail
-		time.Sleep(1 * time.Second)
-		r.Request.Retry()
+		log.Printf("Request URL: %s failed. Proxy: %s. Error: %v", r.Request.URL, r.Request.ProxyURL, err)
+
+		if r.Request.Ctx.GetAny("retries") == nil {
+			r.Request.Ctx.Put("retries", 0)
+		}
+		retries := r.Request.Ctx.GetAny("retries").(int)
+
+		if retries < MaxRetries {
+			log.Printf("Retrying... (%d/%d)", retries+1, MaxRetries)
+			r.Request.Ctx.Put("retries", retries+1)
+			time.Sleep(2 * time.Second) // Backoff
+			r.Request.Retry()
+		} else {
+			log.Println("Max retries reached. Moving on.")
+		}
 	})
 
 	fmt.Println("Visiting:", s.TargetURL)
