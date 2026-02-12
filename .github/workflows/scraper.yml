@@ -1,55 +1,34 @@
 name: Job Scraper
 
+# This workflow commits the locally-scraped jobs.db to the repo.
+# The scraper must be run locally because recruitment.nic.in blocks cloud IPs.
+# Run locally: go run cmd/scraper/main.go
+# Then: git add jobs.db metadata.json && git commit && git push
+
 on:
   push:
     branches: [ "main" ]
-  schedule:
-    - cron: '0 */6 * * *' # Run every 6 hours
-  workflow_dispatch: # Allow manual trigger
+    paths:
+      - 'jobs.db'
+      - 'metadata.json'
+  workflow_dispatch:
 
 jobs:
-  scrape:
+  validate:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # Important for pushing changes
+      contents: read
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.23'
-
-      - name: Fetch Page with Curl
+      - name: Validate jobs.db
         run: |
-          # Use IPv4 (-4) and standard headers to mimic a browser & bypass geo-fencing/firewalls
-          curl -4 -v \
-            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-            -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8" \
-            -H "Accept-Language: en-US,en;q=0.5" \
-            -H "Referer: https://google.com" \
-            -o page.html \
-            -L --retry 3 --max-time 60 --insecure \
-            https://recruitment.nic.in/index_new.php
-
-      - name: Run Scraper
-        run: |
-          # Pass absolute path to page.html
-          PWD=$(pwd)
-          go run cmd/scraper/main.go --target "file://$PWD/page.html"
-
-      - name: Check for changes
-        id: git-check
-        run: |
-          git diff --quiet metadata.json || echo "changes=true" >> $GITHUB_OUTPUT
-
-      - name: Commit and Push changes
-        if: steps.git-check.outputs.changes == 'true'
-        run: |
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git add jobs.db metadata.json
-          git commit -m "Update job database [skip ci]"
-          git push
+          if [ ! -f jobs.db ]; then
+            echo "❌ jobs.db not found"
+            exit 1
+          fi
+          echo "✅ jobs.db exists ($(stat --format=%s jobs.db) bytes)"
+          echo "✅ metadata.json:"
+          cat metadata.json
