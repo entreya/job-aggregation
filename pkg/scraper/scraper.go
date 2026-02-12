@@ -30,6 +30,20 @@ func NewScraper(targetURL string) *Scraper {
 
 	// Only apply proxy rotation if NOT using a local file
 	if !strings.HasPrefix(targetURL, "file://") {
+		// Custom Transport to handle slow gov sites and potential SSL issues
+		transport := &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   10 * time.Second, // Fast fail for proxies
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
+			DisableKeepAlives:     true,
+		}
+
 		log.Println("Fetching proxy list...")
 		// Fetch proxies from a free list (HTTP/S, Anonymous) - Force SSL=yes for HTTPS target
 		resp, err := http.Get("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all&ssl=yes&anonymity=all")
@@ -52,7 +66,9 @@ func NewScraper(targetURL string) *Scraper {
 				if err != nil {
 					log.Printf("Failed to set proxy switcher: %v", err)
 				} else {
-					c.SetProxyFunc(rp)
+					// CRITICAL FIX: Assign the proxy switcher directly to the Transport
+					transport.Proxy = rp
+					// c.SetProxyFunc(rp) // Not needed if we set it on transport, and setting it on c might be ignored if transport is replaced
 				}
 			} else {
 				log.Println("No proxies found. Falling back to direct connection.")
@@ -61,19 +77,6 @@ func NewScraper(targetURL string) *Scraper {
 			log.Printf("Failed to fetch proxy list: %v", err)
 		}
 
-		// Keep the custom transport settings for robustness
-		transport := &http.Transport{
-			DialContext: (&net.Dialer{
-				Timeout:   10 * time.Second, // Fast fail for proxies
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			MaxIdleConns:          100,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-			TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
-			DisableKeepAlives:     true,
-		}
 		c.WithTransport(transport)
 		c.SetRequestTimeout(20 * time.Second) // Fast timeout for individual requests
 	}
