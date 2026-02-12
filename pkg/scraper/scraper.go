@@ -15,10 +15,11 @@ import (
 // Scraper handles the job scraping logic.
 type Scraper struct {
 	collector *colly.Collector
+	TargetURL string
 }
 
 // NewScraper creates a new Scraper instance.
-func NewScraper() *Scraper {
+func NewScraper(targetURL string) *Scraper {
 	// Custom Transport to handle slow gov sites and potential SSL issues
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
@@ -35,6 +36,7 @@ func NewScraper() *Scraper {
 	c := colly.NewCollector(
 		colly.AllowedDomains("recruitment.nic.in"),
 		colly.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"),
+		colly.AllowURLRevisit(),
 	)
 
 	c.WithTransport(transport)
@@ -42,6 +44,7 @@ func NewScraper() *Scraper {
 
 	return &Scraper{
 		collector: c,
+		TargetURL: targetURL,
 	}
 }
 
@@ -52,33 +55,26 @@ func (s *Scraper) Scrape() (*models.JobList, error) {
 		Jobs:        make([]*models.JobPosting, 0),
 	}
 
+	// Register callbacks
 	s.collector.OnHTML("a[href]", func(e *colly.HTMLElement) {
+		// ... (rest of logic same) ...
 		link := e.Attr("href")
 		text := strings.TrimSpace(e.Text)
 
-		// Basic validation to ensure it's a relevant link
 		if link == "" || text == "" {
 			return
 		}
 
-		// Resolve relative URLs
 		absoluteURL := e.Request.AbsoluteURL(link)
 
-		// Filter out irrelevant links if possible (e.g. only pdfs or specific keywords)
-		// For now, we take all links that look like job postings or notifications
-		// We can refine this logic based on actual needs.
-
 		job := &models.JobPosting{
-			Id:         fmt.Sprintf("%s-%d", "nic", time.Now().UnixNano()), // Generate a temp ID, ideally should be based on URL hash
+			Id:         generateID(absoluteURL),
 			Title:      text,
-			Department: "NIC",       // Default
-			Location:   "All India", // Default
+			Department: "NIC",
+			Location:   "All India",
 			Url:        absoluteURL,
-			Date:       time.Now().Format("2006-01-02"), // Current date as proxy
+			Date:       time.Now().Format("2006-01-02"),
 		}
-
-		// Refine ID generation to be deterministic based on URL
-		job.Id = generateID(absoluteURL)
 
 		jobList.Jobs = append(jobList.Jobs, job)
 	})
@@ -87,12 +83,12 @@ func (s *Scraper) Scrape() (*models.JobList, error) {
 		fmt.Println("Request URL:", r.Request.URL, "failed with response:", r, "\nError:", err)
 	})
 
-	err := s.collector.Visit("https://recruitment.nic.in/index_new.php")
+	fmt.Println("Visiting:", s.TargetURL)
+	err := s.collector.Visit(s.TargetURL)
 	if err != nil {
 		return nil, err
 	}
 
-	// Wait for scraping to finish
 	s.collector.Wait()
 
 	return jobList, nil

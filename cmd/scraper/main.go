@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -30,8 +31,12 @@ func main() {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 
+	// Parse flags
+	targetURL := flag.String("target", "https://recruitment.nic.in/index_new.php", "Target URL or file path")
+	flag.Parse()
+
 	// Scrape
-	s := scraper.NewScraper()
+	s := scraper.NewScraper(*targetURL)
 	jobsList, err := s.Scrape()
 	if err != nil {
 		log.Fatalf("Failed to scrape jobs: %v", err)

@@ -22,9 +22,15 @@ jobs:
         with:
           go-version: '1.23'
 
+      - name: Fetch Page with Curl
+        run: |
+          curl -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36" -o page.html -L --retry 3 --max-time 60 --insecure https://recruitment.nic.in/index_new.php
+
       - name: Run Scraper
         run: |
-          go run cmd/scraper/main.go
+          # Pass absolute path to page.html
+          PWD=$(pwd)
+          go run cmd/scraper/main.go --target "file://$PWD/page.html"
 
       - name: Check for changes
         id: git-check
