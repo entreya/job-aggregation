@@ -26,7 +26,8 @@ func TestFetchHTML_Success(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	got, err := FetchHTML(ctx, srv.URL, 5*time.Second)
+	// proxyURL = "" → direct connection (no proxy needed for local httptest)
+	got, err := FetchHTML(ctx, srv.URL, "", 5*time.Second)
 	if err != nil {
 		t.Fatalf("FetchHTML returned unexpected error: %v", err)
 	}
@@ -43,7 +44,7 @@ func TestFetchHTML_Non2xxStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := FetchHTML(context.Background(), srv.URL, 5*time.Second)
+	_, err := FetchHTML(context.Background(), srv.URL, "", 5*time.Second)
 	if err == nil {
 		t.Fatal("expected an error for 403 response, got nil")
 	}
@@ -60,7 +61,7 @@ func TestFetchHTML_EmptyBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := FetchHTML(context.Background(), srv.URL, 5*time.Second)
+	_, err := FetchHTML(context.Background(), srv.URL, "", 5*time.Second)
 	if err == nil {
 		t.Fatal("expected an error for empty body, got nil")
 	}
@@ -82,7 +83,7 @@ func TestFetchHTML_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	_, err := FetchHTML(ctx, srv.URL, 5*time.Second)
+	_, err := FetchHTML(ctx, srv.URL, "", 5*time.Second)
 	if err == nil {
 		t.Fatal("expected context cancellation error, got nil")
 	}
@@ -90,8 +91,25 @@ func TestFetchHTML_ContextCancellation(t *testing.T) {
 
 // TestFetchHTML_InvalidURL verifies that a malformed URL returns an error.
 func TestFetchHTML_InvalidURL(t *testing.T) {
-	_, err := FetchHTML(context.Background(), "://not-a-valid-url", 5*time.Second)
+	_, err := FetchHTML(context.Background(), "://not-a-valid-url", "", 5*time.Second)
 	if err == nil {
 		t.Fatal("expected error for invalid URL, got nil")
+	}
+}
+
+// TestFetchHTML_InvalidProxyURL verifies that a malformed proxy URL returns a
+// descriptive error before any network request is made.
+func TestFetchHTML_InvalidProxyURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("<html>ok</html>"))
+	}))
+	defer srv.Close()
+
+	_, err := FetchHTML(context.Background(), srv.URL, "://bad-proxy", 5*time.Second)
+	if err == nil {
+		t.Fatal("expected error for invalid proxy URL, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid proxy URL") {
+		t.Errorf("expected 'invalid proxy URL' in error, got: %v", err)
 	}
 }

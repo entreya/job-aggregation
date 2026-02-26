@@ -57,14 +57,21 @@ func (s *Scraper) Scrape() (*models.JobList, error) {
 	var htmlContent string
 	var usedProxy string
 
-	// Wrap the entire chromedp operation in the retry loop
-	err := WithRetry(s.RetryCfg, s.TargetURL, "", s.Logger, func(attempt int) error {
-		// Select proxy for this attempt (rotates on each retry)
-		proxyURL := ""
+	// Resolve the initial proxy once so the fallback can use the same one.
+	// The rotator advances on each call, so we capture it before the retry loop.
+	if s.Rotator != nil {
+		usedProxy = s.Rotator.ProxyServerAddr()
+	}
+
+	// Wrap the entire chromedp operation in the retry loop.
+	// Pass usedProxy to WithRetry so failure logs show the correct proxy.
+	err := WithRetry(s.RetryCfg, s.TargetURL, usedProxy, s.Logger, func(attempt int) error {
+		// Re-resolve proxy on each retry to allow rotation across attempts.
+		proxyURL := usedProxy
 		if s.Rotator != nil {
 			proxyURL = s.Rotator.ProxyServerAddr()
+			usedProxy = proxyURL
 		}
-		usedProxy = proxyURL
 
 		s.Logger.Info("scrape attempt starting",
 			slog.String("url", s.TargetURL),
@@ -120,7 +127,7 @@ func (s *Scraper) Scrape() (*models.JobList, error) {
 		httpCtx, httpCancel := context.WithTimeout(context.Background(), s.Timeout)
 		defer httpCancel()
 
-		htmlContent, err = FetchHTML(httpCtx, s.TargetURL, s.Timeout)
+		htmlContent, err = FetchHTML(httpCtx, s.TargetURL, usedProxy, s.Timeout)
 		if err != nil {
 			return nil, fmt.Errorf("scrape failed: chromedp retries exhausted and HTTP fallback failed: %w", err)
 		}

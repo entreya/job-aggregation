@@ -6,6 +6,7 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
@@ -90,18 +91,33 @@ func ChromedpAllocatorOpts(proxyURL string, chromePath string) []chromedp.ExecAl
 // full response body as a string. It uses User-Agent rotation to appear as a
 // real browser. This is used as a lightweight fallback when chromedp fails.
 //
-// timeout: maximum time allowed for the full request/response cycle.
-func FetchHTML(ctx context.Context, url string, timeout time.Duration) (string, error) {
-	client := &http.Client{
-		Timeout: timeout,
-		Transport: &http.Transport{
-			DisableKeepAlives:   false,
-			IdleConnTimeout:     30 * time.Second,
-			TLSHandshakeTimeout: 15 * time.Second,
-		},
+// proxyURL: optional HTTP/HTTPS proxy address (e.g. "http://user:pass@host:8080").
+//
+//	Pass empty string for a direct connection.
+//
+// timeout:  maximum time allowed for the full request/response cycle.
+func FetchHTML(ctx context.Context, targetURL string, proxyURL string, timeout time.Duration) (string, error) {
+	transport := &http.Transport{
+		DisableKeepAlives:   false,
+		IdleConnTimeout:     30 * time.Second,
+		TLSHandshakeTimeout: 15 * time.Second,
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	// Route through the proxy when one is configured, mirroring the chromedp path.
+	if proxyURL != "" {
+		parsed, err := url.Parse(proxyURL)
+		if err != nil {
+			return "", fmt.Errorf("invalid proxy URL %q: %w", proxyURL, err)
+		}
+		transport.Proxy = http.ProxyURL(parsed)
+	}
+
+	client := &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to build HTTP request: %w", err)
 	}
@@ -130,7 +146,7 @@ func FetchHTML(ctx context.Context, url string, timeout time.Duration) (string, 
 	}
 
 	if len(body) == 0 {
-		return "", fmt.Errorf("empty response body from %s", url)
+		return "", fmt.Errorf("empty response body from %s", targetURL)
 	}
 
 	return string(body), nil

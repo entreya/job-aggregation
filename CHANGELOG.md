@@ -25,7 +25,9 @@ All notable changes to this project will be documented in this file.
 - `[FEAT]` Human-like random delay before HTML extraction to reduce detection risk.
 - `[FEAT]` Failure notification (GitHub Issue creation) in VPS workflow.
 - `[DOCS]` Comprehensive scraping strategy research (`docs/debug/SCRAPING_STRATEGY.md`).
-- `[FEAT]` `FetchHTML` HTTP fallback in `pkg/scraper/client.go` — plain `net/http` GET with User-Agent rotation, 10 MB body cap, and context-aware cancellation. Used when chromedp exhausts all retries on CI.
+- `[FIX]` `FetchHTML` now routes through the configured proxy (`proxyURL` param added). HTTP fallback previously went direct on all paths, causing it to also fail when CI IPs are blocked.
+- `[FIX]` `WithRetry` in `scraper.go` now logs the actual `usedProxy` value instead of always logging an empty string on failure.
+- `[TEST]` Added `TestFetchHTML_InvalidProxyURL` (6th test) to verify malformed proxy URLs are caught before any network call.
 - `[TEST]` 5 unit tests for `FetchHTML` in `pkg/scraper/client_test.go` — covers success, non-2xx status, empty body, context cancellation, and invalid URL.
 - `[DOCS]` Debug log added at `docs/debug/SCRAPER_TIMEOUT_ISSUE.md` documenting the CI timeout root cause analysis.
 
