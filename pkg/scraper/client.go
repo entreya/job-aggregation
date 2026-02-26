@@ -87,6 +87,31 @@ func ChromedpAllocatorOpts(proxyURL string, chromePath string) []chromedp.ExecAl
 	return opts
 }
 
+// maskProxy redacts credentials from a proxy URL for safe logging.
+// It preserves the scheme and host so logs remain useful for debugging,
+// but never exposes passwords or tokens.
+//
+// Examples:
+//
+//	"http://user:secret@proxy.host:8080" → "http://***@proxy.host:8080"
+//	"http://proxy.host:8080"             → "http://proxy.host:8080"
+//	""                                   → ""
+func maskProxy(proxyURL string) string {
+	if proxyURL == "" {
+		return ""
+	}
+	parsed, err := url.Parse(proxyURL)
+	if err != nil {
+		// Unparseable — return a safe placeholder rather than leaking the raw string.
+		return "***"
+	}
+	// Redact only if credentials are present.
+	if parsed.User != nil {
+		parsed.User = url.User("***")
+	}
+	return parsed.String()
+}
+
 // FetchHTML performs a simple net/http GET to the given URL and returns the
 // full response body as a string. It uses User-Agent rotation to appear as a
 // real browser. This is used as a lightweight fallback when chromedp fails.

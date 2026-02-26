@@ -75,7 +75,7 @@ func (s *Scraper) Scrape() (*models.JobList, error) {
 
 		s.Logger.Info("scrape attempt starting",
 			slog.String("url", s.TargetURL),
-			slog.String("proxy_used", proxyURL),
+			slog.String("proxy_used", maskProxy(proxyURL)),
 			slog.Int("attempt", attempt+1),
 		)
 
@@ -139,7 +139,7 @@ func (s *Scraper) Scrape() (*models.JobList, error) {
 	} else {
 		s.Logger.Info("page loaded successfully",
 			slog.String("url", s.TargetURL),
-			slog.String("proxy_used", usedProxy),
+			slog.String("proxy_used", maskProxy(usedProxy)),
 			slog.Int("html_length", len(htmlContent)),
 		)
 	}
