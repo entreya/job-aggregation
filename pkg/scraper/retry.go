@@ -41,7 +41,7 @@ func (e *RetryableError) Unwrap() error {
 
 // isRetryable determines if an error warrants a retry.
 // Retries on: network/timeout errors, chromedp context errors, empty responses.
-// Does NOT retry on: nil errors, context cancellation by caller.
+// Does NOT retry on: nil errors, context cancellation by caller, hard proxy failures.
 func isRetryable(err error) bool {
 	if err == nil {
 		return false
@@ -52,6 +52,24 @@ func isRetryable(err error) bool {
 	// Non-retryable: intentional context cancellation
 	if errors.Is(err, errors.New("context canceled")) {
 		return false
+	}
+
+	// Non-retryable: hard proxy failures.
+	// These are structural errors — the proxy is refusing the connection at the
+	// protocol level. Retrying against the same proxy will never succeed.
+	//   ERR_TUNNEL_CONNECTION_FAILED — proxy refused the CONNECT tunnel for HTTPS.
+	//   ERR_PROXY_CONNECTION_FAILED  — proxy TCP connection itself was rejected.
+	nonRetryablePatterns := []string{
+		"err_tunnel_connection_failed",
+		"tunnel connection failed",
+		"err_proxy_connection_failed",
+		"proxy connection failed",
+		"access denied",
+	}
+	for _, pattern := range nonRetryablePatterns {
+		if strings.Contains(errMsg, pattern) {
+			return false
+		}
 	}
 
 	// Retryable patterns: network failures, timeouts, chromedp crashes

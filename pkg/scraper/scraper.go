@@ -117,27 +117,52 @@ func (s *Scraper) Scrape() (*models.JobList, error) {
 	})
 
 	if err != nil {
-		// chromedp exhausted all retries — attempt lightweight HTTP fallback.
-		// This works for server-rendered sites that don't require JS execution.
-		s.Logger.Warn("chromedp failed all retries — attempting HTTP fallback",
+		// Tier 2: HTTP via proxy.
+		// Handles cases where the proxy supports plain HTTP but not CONNECT tunnels.
+		s.Logger.Warn("chromedp failed — attempting HTTP fallback via proxy",
 			slog.String("url", s.TargetURL),
-			slog.String("chromedp_error", err.Error()),
+			slog.String("proxy", maskProxy(usedProxy)),
+			slog.String("reason", err.Error()),
 		)
 
-		httpCtx, httpCancel := context.WithTimeout(context.Background(), s.Timeout)
-		defer httpCancel()
+		tier2Ctx, tier2Cancel := context.WithTimeout(context.Background(), s.Timeout)
+		defer tier2Cancel()
 
-		htmlContent, err = FetchHTML(httpCtx, s.TargetURL, usedProxy, s.Timeout)
+		htmlContent, err = FetchHTML(tier2Ctx, s.TargetURL, usedProxy, s.Timeout)
 		if err != nil {
-			return nil, fmt.Errorf("scrape failed: chromedp retries exhausted and HTTP fallback failed: %w", err)
-		}
+			// Tier 3: HTTP direct — no proxy.
+			// Last resort for when the proxy is fundamentally broken (CONNECT refused,
+			// access denied, wrong type). The target site is server-rendered so a plain
+			// HTTP GET works without a browser or proxy.
+			s.Logger.Warn("HTTP via proxy failed — attempting direct HTTP (no proxy)",
+				slog.String("url", s.TargetURL),
+				slog.String("proxy_error", err.Error()),
+			)
 
-		s.Logger.Info("HTTP fallback succeeded",
-			slog.String("url", s.TargetURL),
-			slog.Int("html_length", len(htmlContent)),
-		)
+			tier3Ctx, tier3Cancel := context.WithTimeout(context.Background(), s.Timeout)
+			defer tier3Cancel()
+
+			htmlContent, err = FetchHTML(tier3Ctx, s.TargetURL, "", s.Timeout)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"all scrape paths exhausted — chromedp: proxy failed, HTTP: proxy failed, HTTP: direct failed: %w",
+					err,
+				)
+			}
+
+			s.Logger.Info("direct HTTP fallback succeeded",
+				slog.String("url", s.TargetURL),
+				slog.Int("html_length", len(htmlContent)),
+			)
+		} else {
+			s.Logger.Info("HTTP via proxy fallback succeeded",
+				slog.String("url", s.TargetURL),
+				slog.String("proxy", maskProxy(usedProxy)),
+				slog.Int("html_length", len(htmlContent)),
+			)
+		}
 	} else {
-		s.Logger.Info("page loaded successfully",
+		s.Logger.Info("page loaded successfully via chromedp",
 			slog.String("url", s.TargetURL),
 			slog.String("proxy_used", maskProxy(usedProxy)),
 			slog.Int("html_length", len(htmlContent)),
