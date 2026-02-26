@@ -6,13 +6,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/entreya/job-aggregation/pkg/db"
+	"github.com/entreya/job-aggregation/pkg/logger"
 	"github.com/entreya/job-aggregation/pkg/models"
+	"github.com/entreya/job-aggregation/pkg/proxy"
 	"github.com/entreya/job-aggregation/pkg/scraper"
 )
 
@@ -20,6 +22,7 @@ const (
 	jobsJSONPath = "data/jobs.json"
 )
 
+// Metadata represents the sync metadata for client-side update checks.
 type Metadata struct {
 	LastUpdated int64  `json:"last_updated"`
 	Checksum    string `json:"checksum"`
@@ -27,25 +30,69 @@ type Metadata struct {
 }
 
 func main() {
-	log.Println("Starting job scraper (Chromedp Mode)...")
+	// ─── 1. Initialize structured logger ───────────────────────────────
+	env := os.Getenv("ENV")
+	if env == "" {
+		env = "development"
+	}
+	log := logger.Init(env)
+	log.Info("starting job scraper",
+		slog.String("env", env),
+	)
 
-	// Initialize DB
+	// ─── 2. Initialize proxy rotator ───────────────────────────────────
+	proxyURLs := os.Getenv("PROXY_URLS")
+	proxyStrategy := os.Getenv("PROXY_STRATEGY")
+	if proxyStrategy == "" {
+		proxyStrategy = "round-robin"
+	}
+
+	rotator, err := proxy.NewRotator(proxyURLs, proxyStrategy, log)
+	if err != nil {
+		log.Error("failed to initialize proxy rotator",
+			slog.String("error", err.Error()),
+		)
+		os.Exit(1)
+	}
+
+	// ─── 3. Initialize database ────────────────────────────────────────
 	dbPath := "jobs.db"
 	database, err := db.InitDB(dbPath)
 	if err != nil {
-		log.Fatalf("Failed to initialize database: %v", err)
+		log.Error("failed to initialize database",
+			slog.String("error", err.Error()),
+		)
+		os.Exit(1)
 	}
 
-	// Scrape
-	s := scraper.NewScraper("https://recruitment.nic.in/index_new.php")
+	// ─── 4. Configure and run scraper ──────────────────────────────────
+	chromePath := os.Getenv("CHROME_PATH")
+	s := scraper.NewScraper(scraper.Config{
+		TargetURL:  "https://recruitment.nic.in/index_new.php",
+		Rotator:    rotator,
+		RetryCfg:   scraper.DefaultRetryConfig(),
+		Logger:     log,
+		ChromePath: chromePath,
+		Timeout:    60 * time.Second,
+	})
+
 	jobsList, err := s.Scrape()
 	if err != nil {
-		log.Fatalf("Failed to scrape jobs: %v", err)
+		log.Error("scrape failed",
+			slog.String("error", err.Error()),
+		)
+		// Close DB before exiting
+		if closeErr := database.OptimizeAndClose(); closeErr != nil {
+			log.Error("failed to close DB", slog.String("error", closeErr.Error()))
+		}
+		os.Exit(1)
 	}
 
-	log.Printf("Scraped %d jobs. Inserting into DB...", len(jobsList.Jobs))
+	log.Info("scrape successful",
+		slog.Int("jobs_count", len(jobsList.Jobs)),
+	)
 
-	// Insert into SQLite and upsert
+	// ─── 5. Insert jobs into SQLite (upsert) ───────────────────────────
 	for _, j := range jobsList.Jobs {
 		job := db.Job{
 			ID:         j.Id,
@@ -56,26 +103,49 @@ func main() {
 			URL:        j.Url,
 		}
 		if err := database.UpsertJob(job); err != nil {
-			log.Printf("Failed to upsert job %s: %v", j.Id, err)
+			log.Warn("failed to upsert job",
+				slog.String("job_id", j.Id),
+				slog.String("error", err.Error()),
+			)
 		}
 	}
 
-	// Optimize and Close
+	// ─── 6. Optimize and close DB ──────────────────────────────────────
 	if err := database.OptimizeAndClose(); err != nil {
-		log.Fatalf("Failed to optimize and close DB: %v", err)
+		log.Error("failed to optimize and close DB",
+			slog.String("error", err.Error()),
+		)
+		os.Exit(1)
 	}
 
-	// Generate Metadata
+	// ─── 7. Generate metadata ──────────────────────────────────────────
 	if err := generateMetadata(dbPath, len(jobsList.Jobs)); err != nil {
-		log.Fatalf("Failed to generate metadata: %v", err)
+		log.Error("failed to generate metadata",
+			slog.String("error", err.Error()),
+		)
+		os.Exit(1)
 	}
 
-	// Export to JSON
+	// ─── 8. Export to JSON (legacy format for Flutter client) ───────────
 	if err := exportToJSON(jobsList); err != nil {
-		log.Printf("Error exporting to JSON: %v", err)
+		log.Warn("error exporting to JSON (non-fatal)",
+			slog.String("error", err.Error()),
+		)
 	}
 
-	log.Println("Successfully updated jobs.db, metadata.json, and data/jobs.json")
+	// ─── 9. Append to output file (new format with timestamps) ─────────
+	outputCfg := scraper.DefaultOutputConfig()
+	if err := scraper.AppendResults(jobsList.Jobs, outputCfg, log); err != nil {
+		log.Warn("error appending output (non-fatal)",
+			slog.String("error", err.Error()),
+		)
+	}
+
+	log.Info("pipeline complete",
+		slog.String("db", dbPath),
+		slog.String("metadata", "metadata.json"),
+		slog.String("json_export", jobsJSONPath),
+	)
 }
 
 func generateMetadata(dbPath string, count int) error {
@@ -106,7 +176,6 @@ func generateMetadata(dbPath string, count int) error {
 }
 
 func exportToJSON(jobList *models.JobList) error {
-	// Ensure directory exists
 	dir := filepath.Dir(jobsJSONPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err

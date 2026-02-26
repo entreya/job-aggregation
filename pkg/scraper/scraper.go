@@ -3,115 +3,136 @@ package scraper
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
-	"github.com/PuerkitoBio/goquery"
 	"github.com/chromedp/chromedp"
 	"github.com/entreya/job-aggregation/pkg/models"
+	"github.com/entreya/job-aggregation/pkg/proxy"
 )
 
-// Scraper handles the job scraping logic.
+// Scraper handles the job scraping logic with proxy rotation and retry support.
 type Scraper struct {
-	TargetURL string
+	TargetURL  string
+	Rotator    *proxy.ProxyRotator
+	RetryCfg   RetryConfig
+	Logger     *slog.Logger
+	ChromePath string // Custom browser path (empty = auto-detect)
+	Timeout    time.Duration
 }
 
-func NewScraper(targetURL string) *Scraper {
+// Config holds initialization parameters for the Scraper.
+type Config struct {
+	TargetURL  string
+	Rotator    *proxy.ProxyRotator
+	RetryCfg   RetryConfig
+	Logger     *slog.Logger
+	ChromePath string
+	Timeout    time.Duration
+}
+
+// NewScraper creates a Scraper with all dependencies injected.
+func NewScraper(cfg Config) *Scraper {
+	if cfg.Timeout == 0 {
+		cfg.Timeout = 60 * time.Second
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+
 	return &Scraper{
-		TargetURL: targetURL,
+		TargetURL:  cfg.TargetURL,
+		Rotator:    cfg.Rotator,
+		RetryCfg:   cfg.RetryCfg,
+		Logger:     cfg.Logger,
+		ChromePath: cfg.ChromePath,
+		Timeout:    cfg.Timeout,
 	}
 }
 
-// Scrape fetches job postings from the recruitment site using Chromedp.
+// Scrape fetches job postings from the target URL using chromedp with
+// proxy rotation, retry logic, and anti-bot countermeasures.
 func (s *Scraper) Scrape() (*models.JobList, error) {
-	// Create context
-	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("headless", true),
-		chromedp.Flag("disable-gpu", true),
-		chromedp.Flag("no-sandbox", true),
-		chromedp.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
-	)
-	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
-	defer cancel()
-
-	ctx, cancel := chromedp.NewContext(allocCtx)
-	defer cancel()
-
-	// Set a timeout for the entire operation
-	ctx, cancel = context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-
-	log.Printf("Visiting %s using Chromedp...", s.TargetURL)
-
 	var htmlContent string
-	err := chromedp.Run(ctx,
-		chromedp.Navigate(s.TargetURL),
-		chromedp.WaitVisible("body", chromedp.ByQuery),
-		chromedp.OuterHTML("html", &htmlContent),
-	)
+	var usedProxy string
+
+	// Wrap the entire chromedp operation in the retry loop
+	err := WithRetry(s.RetryCfg, s.TargetURL, "", s.Logger, func(attempt int) error {
+		// Select proxy for this attempt (rotates on each retry)
+		proxyURL := ""
+		if s.Rotator != nil {
+			proxyURL = s.Rotator.ProxyServerAddr()
+		}
+		usedProxy = proxyURL
+
+		s.Logger.Info("scrape attempt starting",
+			slog.String("url", s.TargetURL),
+			slog.String("proxy_used", proxyURL),
+			slog.Int("attempt", attempt+1),
+		)
+
+		// Human-like delay before request (1–3 seconds)
+		HumanDelay(1, 3)
+
+		// Build chromedp allocator with anti-bot options
+		opts := ChromedpAllocatorOpts(proxyURL, s.ChromePath)
+
+		allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), opts...)
+		defer allocCancel()
+
+		ctx, ctxCancel := chromedp.NewContext(allocCtx)
+		defer ctxCancel()
+
+		// Operation timeout
+		ctx, timeoutCancel := context.WithTimeout(ctx, s.Timeout)
+		defer timeoutCancel()
+
+		var html string
+		runErr := chromedp.Run(ctx,
+			chromedp.Navigate(s.TargetURL),
+			chromedp.WaitVisible("body", chromedp.ByQuery),
+			// Small human-like delay before extraction
+			chromedp.Sleep(time.Duration(1)*time.Second),
+			chromedp.OuterHTML("html", &html),
+		)
+		if runErr != nil {
+			return fmt.Errorf("chromedp navigation failed: %w", runErr)
+		}
+
+		// Validate we got meaningful HTML
+		if strings.TrimSpace(html) == "" || len(html) < 100 {
+			return fmt.Errorf("empty response from %s", s.TargetURL)
+		}
+
+		htmlContent = html
+		return nil
+	})
+
 	if err != nil {
-		return nil, fmt.Errorf("failed to navigate to %s: %v", s.TargetURL, err)
+		return nil, fmt.Errorf("scrape failed after retries: %w", err)
 	}
 
-	log.Println("Page loaded. Parsing HTML...")
+	s.Logger.Info("page loaded successfully",
+		slog.String("url", s.TargetURL),
+		slog.String("proxy_used", usedProxy),
+		slog.Int("html_length", len(htmlContent)),
+	)
 
-	// Parse HTML with GoQuery to extract jobs
-	doc, err := goquery.NewDocumentFromReader(strings.NewReader(htmlContent))
+	// Parse HTML into structured job data
+	jobs, err := ParseJobs(htmlContent, s.Logger)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse HTML: %v", err)
+		return nil, fmt.Errorf("failed to parse HTML: %w", err)
 	}
 
 	jobList := &models.JobList{
 		LastUpdated: time.Now().Unix(),
-		Jobs:        make([]*models.JobPosting, 0),
+		Jobs:        jobs,
 	}
 
-	doc.Find("a[href]").Each(func(i int, s *goquery.Selection) {
-		link, exists := s.Attr("href")
-		if !exists {
-			return
-		}
-		text := strings.TrimSpace(s.Text())
+	s.Logger.Info("scrape complete",
+		slog.Int("jobs_found", len(jobs)),
+	)
 
-		if link == "" || text == "" {
-			return
-		}
-
-		// Handle relative URLs
-		if !strings.HasPrefix(link, "http") {
-			// Basic relative URL handling (assuming base is recruitment.nic.in/index_new.php or similar)
-			// Ideally we resolve against base URL properly, but for this specific site:
-			// If it starts with /, it's root relative. If not, it's relative to current path.
-			// The original colly code used e.Request.AbsoluteURL(link).
-			// We can reconstruct it manually or use a helper.
-			// Given extraction is from "recruitment.nic.in", we can prefix.
-			baseURL := "https://recruitment.nic.in/"
-			if strings.HasPrefix(link, "/") {
-				link = strings.TrimSuffix(baseURL, "/") + link
-			} else {
-				// Simple join if not absolute
-				link = baseURL + link
-			}
-		}
-
-		job := &models.JobPosting{
-			Id:         generateID(link),
-			Title:      text,
-			Department: "NIC",
-			Location:   "All India",
-			Url:        link,
-			Date:       time.Now().Format("2006-01-02"),
-		}
-
-		jobList.Jobs = append(jobList.Jobs, job)
-	})
-
-	log.Printf("Found %d potential job links.", len(jobList.Jobs))
 	return jobList, nil
-}
-
-func generateID(url string) string {
-	// Simple ID generation
-	return url
 }

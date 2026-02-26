@@ -1,19 +1,14 @@
-name: Job Scraper (WARP + Chromedp)
+name: Job Scraper (Proxy + Chromedp)
 
 on:
   schedule:
-    - cron: '0 */6 * * *' # Run every 6 hours
-  workflow_dispatch:      # Allow manual trigger
-  push:
-    branches: [ "main" ]
-    paths-ignore:         # Prevent loop
-      - 'jobs.db'
-      - 'metadata.json'
-      - 'data/jobs.json'
+    - cron: '0 */6 * * *'  # Every 6 hours
+  workflow_dispatch:        # Manual trigger
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
       issues: write
@@ -32,17 +27,19 @@ jobs:
         with:
           chrome-version: stable
 
-      - name: Setup Cloudflare WARP
-        uses: Boostport/setup-cloudflare-warp@v1
-        with:
-          organization: ${{ secrets.CLOUDFLARE_ORG }}
-          auth_client_id: ${{ secrets.WARP_CLIENT_ID }}
-          auth_client_secret: ${{ secrets.WARP_CLIENT_SECRET }}
-        continue-on-error: true # Allow to fail gracefully if secrets not set, though scraping likely fails then
+      - name: Run Tests
+        run: go test ./...
+
+      - name: Build Scraper
+        run: go build -o ./bin/scraper ./cmd/scraper/
 
       - name: Run Scraper
-        run: |
-          go run cmd/scraper/main.go
+        env:
+          PROXY_URLS: ${{ secrets.PROXY_URLS }}
+          PROXY_STRATEGY: "round-robin"
+          ENV: "production"
+          CHROME_PATH: ""
+        run: ./bin/scraper
 
       - name: Check for changes
         id: git-check
@@ -54,9 +51,18 @@ jobs:
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git add jobs.db metadata.json data/jobs.json
+          git add jobs.db metadata.json data/jobs.json output/
           git commit -m "Update job database [skip ci]"
           git push
+
+      - name: Upload Output Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scraper-output
+          path: output/
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Create Issue on Failure
         if: failure()

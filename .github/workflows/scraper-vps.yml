@@ -1,0 +1,81 @@
+name: Job Scraper (Indian VPS)
+
+on:
+  schedule:
+    - cron: '30 */6 * * *' # Run every 6 hours (offset by 30 mins)
+  workflow_dispatch:        # Manual trigger
+
+jobs:
+  scrape-vps:
+    # Targets your Self-Hosted Runner in India (Oracle Cloud Mumbai)
+    runs-on: self-hosted
+
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      issues: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # Go is installed globally on the VPS, but we ensure path is set
+      - name: Setup Go Path
+        run: echo "/usr/local/go/bin" >> $GITHUB_PATH
+
+      - name: Detect Browser
+        id: browser
+        run: |
+          # ARM (Oracle Cloud) uses Chromium; x64 uses Chrome
+          if command -v chromium-browser &> /dev/null; then
+            echo "path=$(which chromium-browser)" >> $GITHUB_OUTPUT
+            echo "name=Chromium" >> $GITHUB_OUTPUT
+            chromium-browser --version
+          elif command -v google-chrome &> /dev/null; then
+            echo "path=$(which google-chrome)" >> $GITHUB_OUTPUT
+            echo "name=Chrome" >> $GITHUB_OUTPUT
+            google-chrome --version
+          else
+            echo "::error::No browser found! Install chromium-browser or google-chrome."
+            exit 1
+          fi
+
+      - name: Verify Environment
+        run: |
+          echo "Go: $(go version)"
+          echo "Browser: ${{ steps.browser.outputs.name }} at ${{ steps.browser.outputs.path }}"
+          echo "Arch: $(uname -m)"
+
+      - name: Run Scraper (Direct)
+        env:
+          CHROME_PATH: ${{ steps.browser.outputs.path }}
+        run: |
+          # Runs directly on the VPS network (India IP)
+          # No proxies or WARP needed!
+          go run cmd/scraper/main.go
+
+      - name: Check for changes
+        id: git-check
+        run: |
+          git diff --quiet metadata.json || echo "changes=true" >> $GITHUB_OUTPUT
+
+      - name: Commit and Push changes
+        if: steps.git-check.outputs.changes == 'true'
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add jobs.db metadata.json data/jobs.json
+          git commit -m "Update job database (VPS) [skip ci]"
+          git push
+
+      - name: Create Issue on Failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🚨 VPS Scraper Failed',
+              body: `The VPS scraper workflow failed on \`${process.env.RUNNER_NAME}\`.\nPlease check the Action logs for details.\n\nPossible causes:\n- VPS is down or unreachable\n- Chromium crashed (OOM)\n- recruitment.nic.in changed its structure`
+            })
