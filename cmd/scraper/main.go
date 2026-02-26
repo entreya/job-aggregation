@@ -73,7 +73,7 @@ func main() {
 		RetryCfg:   scraper.DefaultRetryConfig(),
 		Logger:     log,
 		ChromePath: chromePath,
-		Timeout:    60 * time.Second,
+		Timeout:    90 * time.Second,
 	})
 
 	jobsList, err := s.Scrape()

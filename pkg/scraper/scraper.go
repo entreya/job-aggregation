@@ -35,7 +35,7 @@ type Config struct {
 // NewScraper creates a Scraper with all dependencies injected.
 func NewScraper(cfg Config) *Scraper {
 	if cfg.Timeout == 0 {
-		cfg.Timeout = 60 * time.Second
+		cfg.Timeout = 90 * time.Second
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -110,16 +110,34 @@ func (s *Scraper) Scrape() (*models.JobList, error) {
 	})
 
 	if err != nil {
-		return nil, fmt.Errorf("scrape failed after retries: %w", err)
+		// chromedp exhausted all retries — attempt lightweight HTTP fallback.
+		// This works for server-rendered sites that don't require JS execution.
+		s.Logger.Warn("chromedp failed all retries — attempting HTTP fallback",
+			slog.String("url", s.TargetURL),
+			slog.String("chromedp_error", err.Error()),
+		)
+
+		httpCtx, httpCancel := context.WithTimeout(context.Background(), s.Timeout)
+		defer httpCancel()
+
+		htmlContent, err = FetchHTML(httpCtx, s.TargetURL, s.Timeout)
+		if err != nil {
+			return nil, fmt.Errorf("scrape failed: chromedp retries exhausted and HTTP fallback failed: %w", err)
+		}
+
+		s.Logger.Info("HTTP fallback succeeded",
+			slog.String("url", s.TargetURL),
+			slog.Int("html_length", len(htmlContent)),
+		)
+	} else {
+		s.Logger.Info("page loaded successfully",
+			slog.String("url", s.TargetURL),
+			slog.String("proxy_used", usedProxy),
+			slog.Int("html_length", len(htmlContent)),
+		)
 	}
 
-	s.Logger.Info("page loaded successfully",
-		slog.String("url", s.TargetURL),
-		slog.String("proxy_used", usedProxy),
-		slog.Int("html_length", len(htmlContent)),
-	)
-
-	// Parse HTML into structured job data
+	// Parse HTML into structured job data — applies to both chromedp success and HTTP fallback.
 	jobs, err := ParseJobs(htmlContent, s.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse HTML: %w", err)

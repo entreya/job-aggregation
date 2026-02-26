@@ -1,7 +1,11 @@
 package scraper
 
 import (
+	"context"
+	"fmt"
+	"io"
 	"math/rand"
+	"net/http"
 	"os"
 	"time"
 
@@ -80,4 +84,54 @@ func ChromedpAllocatorOpts(proxyURL string, chromePath string) []chromedp.ExecAl
 	}
 
 	return opts
+}
+
+// FetchHTML performs a simple net/http GET to the given URL and returns the
+// full response body as a string. It uses User-Agent rotation to appear as a
+// real browser. This is used as a lightweight fallback when chromedp fails.
+//
+// timeout: maximum time allowed for the full request/response cycle.
+func FetchHTML(ctx context.Context, url string, timeout time.Duration) (string, error) {
+	client := &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			DisableKeepAlives:   false,
+			IdleConnTimeout:     30 * time.Second,
+			TLSHandshakeTimeout: 15 * time.Second,
+		},
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to build HTTP request: %w", err)
+	}
+
+	// Rotate User-Agent to appear as a real browser
+	req.Header.Set("User-Agent", RandomUA())
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
+	req.Header.Set("Connection", "keep-alive")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("HTTP GET failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("unexpected HTTP status: %d %s", resp.StatusCode, resp.Status)
+	}
+
+	// Read with a reasonable size cap (10 MB) to avoid memory exhaustion
+	const maxBodySize = 10 << 20 // 10 MB
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
+	if err != nil {
+		return "", fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	if len(body) == 0 {
+		return "", fmt.Errorf("empty response body from %s", url)
+	}
+
+	return string(body), nil
 }

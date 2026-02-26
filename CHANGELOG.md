@@ -25,10 +25,13 @@ All notable changes to this project will be documented in this file.
 - `[FEAT]` Human-like random delay before HTML extraction to reduce detection risk.
 - `[FEAT]` Failure notification (GitHub Issue creation) in VPS workflow.
 - `[DOCS]` Comprehensive scraping strategy research (`docs/debug/SCRAPING_STRATEGY.md`).
-- `[DOCS]` Created `CHANGELOG.md`.
+- `[FEAT]` `FetchHTML` HTTP fallback in `pkg/scraper/client.go` — plain `net/http` GET with User-Agent rotation, 10 MB body cap, and context-aware cancellation. Used when chromedp exhausts all retries on CI.
+- `[TEST]` 5 unit tests for `FetchHTML` in `pkg/scraper/client_test.go` — covers success, non-2xx status, empty body, context cancellation, and invalid URL.
+- `[DOCS]` Debug log added at `docs/debug/SCRAPER_TIMEOUT_ISSUE.md` documenting the CI timeout root cause analysis.
 
 ### Changed
-- `[REFACTOR]` Rewrote `self_hosted_runner_setup.md` for Oracle Cloud ARM64 (was DigitalOcean x64).
+- `[PERF]` Chromedp timeout increased 60s → 90s in `scraper.go` and `main.go` to accommodate slow government site load times on CI runners.
+- `[CI]` GitHub Actions `timeout-minutes` bumped 15 → 20 to match the extended per-attempt timeout.
 - `[REFACTOR]` Rewrote `scraper-vps.yml` with browser auto-detection and ARM support.
 - `[DOCS]` Updated `README.md` — corrected `colly` → `chromedp`, added env vars, deployment guide.
 
